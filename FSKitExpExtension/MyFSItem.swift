@@ -40,6 +40,7 @@ final class MyFSItem: FSItem {
         attributes.birthTime = timespec
         attributes.changeTime = timespec
         attributes.modifyTime = timespec
+        attributes.accessTime = timespec
     }
     
     func addItem(_ item: MyFSItem) {
