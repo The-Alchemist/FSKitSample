@@ -6,51 +6,55 @@
 //
 
 import Foundation
+import Darwin
 import FSKit
 import os
+import ZipFSCore
 
 final class MyFSVolume: FSVolume {
     
     private let resource: FSResource
-    
+    private let zipVolume: ZipVolume
     private let logger = Logger(subsystem: "FSKitExp", category: "MyFSVolume")
+    private var items: [UInt64: MyFSItem] = [:]
+    private let rootItem: MyFSItem
     
-    private let root: MyFSItem = {
-        let item = MyFSItem(name: FSFileName(string: "/"))
-        item.attributes.parentID = .parentOfRoot
-        item.attributes.fileID = .rootDirectory
-        item.attributes.uid = 0
-        item.attributes.gid = 0
-        item.attributes.linkCount = 1
-        item.attributes.type = .directory
-        item.attributes.mode = UInt32(S_IFDIR | 0b111_000_000)
-        item.attributes.allocSize = 1
-        item.attributes.size = 1
-        return item
-    }()
-    
-    init(resource: FSResource) {
+    init(resource: FSResource, archive: ZipArchive, volumeName: String) throws {
         self.resource = resource
+        self.zipVolume = ZipVolume(archive: archive, name: volumeName)
+        self.rootItem = MyFSItem(node: zipVolume.root)
+        self.items[zipVolume.root.fileID] = rootItem
         
         super.init(
-            volumeID: FSVolume.Identifier(uuid: Constants.volumeIdentifier),
-            volumeName: FSFileName(string: "Test1")
+            volumeID: FSVolume.Identifier(
+                uuid: ResourceIdentity.uuid(for: volumeName + String(describing: resource), namespace: "volume")
+            ),
+            volumeName: FSFileName(string: volumeName)
         )
+    }
+    
+    private func item(for node: ZipNode) -> MyFSItem {
+        if let existing = items[node.fileID] {
+            return existing
+        }
+        let created = MyFSItem(node: node)
+        items[node.fileID] = created
+        return created
     }
 }
 
 extension MyFSVolume: FSVolume.PathConfOperations {
     
     var maximumLinkCount: Int {
-        return -1
+        return 1
     }
     
     var maximumNameLength: Int {
-        return -1
+        return 255
     }
     
     var restrictsOwnershipChanges: Bool {
-        return false
+        return true
     }
     
     var truncatesLongNames: Bool {
@@ -58,7 +62,7 @@ extension MyFSVolume: FSVolume.PathConfOperations {
     }
     
     var maximumXattrSize: Int {
-        return Int.max
+        return 0
     }
     
     var maximumFileSize: UInt64 {
@@ -72,36 +76,40 @@ extension MyFSVolume: FSVolume.Operations {
         logger.debug("supportedVolumeCapabilities")
         
         let capabilities = FSVolume.SupportedCapabilities()
-        capabilities.supportsHardLinks = true
-        capabilities.supportsSymbolicLinks = true
+        capabilities.supportsHardLinks = false
+        capabilities.supportsSymbolicLinks = false
         capabilities.supportsPersistentObjectIDs = true
         capabilities.doesNotSupportVolumeSizes = true
         capabilities.supportsHiddenFiles = true
         capabilities.supports64BitObjectIDs = true
-        capabilities.caseFormat = .insensitiveCasePreserving
+        capabilities.caseFormat = .sensitive
         return capabilities
     }
-    
+
     var volumeStatistics: FSStatFSResult {
         logger.debug("volumeStatistics")
 
         let result = FSStatFSResult(fileSystemTypeName: "MyFS")
-        
-        result.blockSize = 1024000
-        result.ioSize = 1024000
-        result.totalBlocks = 1024000
-        result.availableBlocks = 1024000
-        result.freeBlocks = 1024000
-        result.totalFiles = 1024000
-        result.freeFiles = 1024000
-        
+        let total = max(zipVolume.archive.totalUncompressedSize, 1)
+        result.blockSize = 4096
+        result.ioSize = 4096
+        result.totalBlocks = (total + 4095) / 4096
+        result.availableBlocks = 0
+        result.freeBlocks = 0
+        result.totalFiles = UInt64(zipVolume.archive.entries.count)
+        result.freeFiles = 0
         return result
     }
-    
+
+    @available(macOS 26.4, *)
+    var requestedMountOptions: FSVolume.MountOptions {
+        get { .readOnly }
+        set { }
+    }
     
     func activate(options: FSTaskOptions) async throws -> FSItem {
         logger.debug("activate")
-        return root
+        return rootItem
     }
     
     func deactivate(options: FSDeactivateOptions = []) async throws {
@@ -124,26 +132,19 @@ extension MyFSVolume: FSVolume.Operations {
         _ desiredAttributes: FSItem.GetAttributesRequest,
         of item: FSItem
     ) async throws -> FSItem.Attributes {
-        if let item = item as? MyFSItem {
-            logger.debug("getItemAttributes1: \(item.name), \(desiredAttributes)")
-            return item.attributes
-        } else {
-            logger.debug("getItemAttributes2: \(item), \(desiredAttributes)")
-            throw fs_errorForPOSIXError(POSIXError.EIO.rawValue)
+        guard let item = item as? MyFSItem else {
+            throw ZipPOSIX.error(.EIO)
         }
+        logger.debug("getItemAttributes: \(item.name)")
+        return item.attributes
     }
     
     func setAttributes(
         _ newAttributes: FSItem.SetAttributesRequest,
         on item: FSItem
     ) async throws -> FSItem.Attributes {
-        logger.debug("setItemAttributes: \(item), \(newAttributes)")
-        if let item = item as? MyFSItem {
-            mergeAttributes(item.attributes, request: newAttributes)
-            return item.attributes
-        } else {
-            throw fs_errorForPOSIXError(POSIXError.EIO.rawValue)
-        }
+        logger.debug("setItemAttributes: \(item)")
+        throw ZipPOSIX.error(.EROFS)
     }
     
     func lookupItem(
@@ -153,13 +154,18 @@ extension MyFSVolume: FSVolume.Operations {
         logger.debug("lookupName: \(String(describing: name.string)), \(directory)")
         
         guard let directory = directory as? MyFSItem else {
-            throw fs_errorForPOSIXError(POSIXError.ENOENT.rawValue)
+            throw ZipPOSIX.error(.ENOENT)
+        }
+        guard let nameString = name.string else {
+            throw ZipPOSIX.error(.ENOENT)
         }
         
-        if let item = directory.children[name] {
+        do {
+            let node = try zipVolume.lookup(name: nameString, in: directory.node)
+            let item = item(for: node)
             return (item, name)
-        } else {
-            throw fs_errorForPOSIXError(POSIXError.ENOENT.rawValue)
+        } catch {
+            throw ZipPOSIX.map(error)
         }
     }
     
@@ -170,8 +176,7 @@ extension MyFSVolume: FSVolume.Operations {
     func readSymbolicLink(
         _ item: FSItem
     ) async throws -> FSFileName {
-        logger.debug("readSymbolicLink: \(item)")
-        throw fs_errorForPOSIXError(POSIXError.EIO.rawValue)
+        throw ZipPOSIX.error(.EINVAL)
     }
     
     func createItem(
@@ -180,19 +185,7 @@ extension MyFSVolume: FSVolume.Operations {
         inDirectory directory: FSItem,
         attributes newAttributes: FSItem.SetAttributesRequest
     ) async throws -> (FSItem, FSFileName) {
-        logger.debug("createItem: \(String(describing: name.string)) - \(newAttributes.mode)")
-        
-        guard let directory = directory as? MyFSItem else {
-            throw fs_errorForPOSIXError(POSIXError.EIO.rawValue)
-        }
-        
-        let item = MyFSItem(name: name)
-        mergeAttributes(item.attributes, request: newAttributes)
-        item.attributes.parentID = directory.attributes.fileID
-        item.attributes.type = type
-        directory.addItem(item)
-        
-        return (item, name)
+        throw ZipPOSIX.error(.EROFS)
     }
     
     func createSymbolicLink(
@@ -201,8 +194,7 @@ extension MyFSVolume: FSVolume.Operations {
         attributes newAttributes: FSItem.SetAttributesRequest,
         linkContents contents: FSFileName
     ) async throws -> (FSItem, FSFileName) {
-        logger.debug("createSymbolicLink: \(name)")
-        throw fs_errorForPOSIXError(POSIXError.EIO.rawValue)
+        throw ZipPOSIX.error(.EROFS)
     }
     
     func createLink(
@@ -210,8 +202,7 @@ extension MyFSVolume: FSVolume.Operations {
         named name: FSFileName,
         inDirectory directory: FSItem
     ) async throws -> FSFileName {
-        logger.debug("createLink: \(name)")
-        throw fs_errorForPOSIXError(POSIXError.EIO.rawValue)
+        throw ZipPOSIX.error(.EROFS)
     }
     
     func removeItem(
@@ -219,12 +210,7 @@ extension MyFSVolume: FSVolume.Operations {
         named name: FSFileName,
         fromDirectory directory: FSItem
     ) async throws {
-        logger.debug("remove: \(name)")
-        if let item = item as? MyFSItem, let directory = directory as? MyFSItem {
-            directory.removeItem(item)
-        } else {
-            throw fs_errorForPOSIXError(POSIXError.EIO.rawValue)
-        }
+        throw ZipPOSIX.error(.EROFS)
     }
     
     func renameItem(
@@ -235,8 +221,7 @@ extension MyFSVolume: FSVolume.Operations {
         inDirectory destinationDirectory: FSItem,
         overItem: FSItem?
     ) async throws -> FSFileName {
-        logger.debug("rename: \(item)")
-        throw fs_errorForPOSIXError(POSIXError.EIO.rawValue)
+        throw ZipPOSIX.error(.EROFS)
     }
     
     func enumerateDirectory(
@@ -249,104 +234,29 @@ extension MyFSVolume: FSVolume.Operations {
         logger.debug("enumerateDirectory: \(directory)")
 
         guard let directory = directory as? MyFSItem else {
-            throw fs_errorForPOSIXError(POSIXError.ENOENT.rawValue)
+            throw ZipPOSIX.error(.ENOTDIR)
         }
         
-        logger.debug("- enumerateDirectory - \(directory.name)")
-        
-        for (idx, item) in directory.children.values.enumerated() {
-            let isLast = (idx == directory.children.count - 1)
-            
-            let v = packer.packEntry(
-                name: item.name,
-                itemType: item.attributes.type,
-                itemID: item.attributes.fileID,
-                nextCookie: FSDirectoryCookie(UInt64(idx)),
-                attributes: attributes != nil ? item.attributes : nil
-            )
-            
-            logger.debug("-- V: \(v) - \(item.name)")
+        do {
+        let entries = try zipVolume.enumerate(directory.node, startingAt: UInt64(cookie.rawValue))
+            for entry in entries {
+                let item = item(for: entry.node)
+                let packed = packer.packEntry(
+                    name: item.name,
+                    itemType: item.attributes.type,
+                    itemID: item.attributes.fileID,
+                    nextCookie: FSDirectoryCookie(entry.nextCookie),
+                    attributes: attributes != nil ? item.attributes : nil
+                )
+                if !packed {
+                    break
+                }
+            }
+        } catch {
+            throw ZipPOSIX.map(error)
         }
 
         return FSDirectoryVerifier(0)
-    }
-    
-    private func mergeAttributes(_ existing: FSItem.Attributes, request: FSItem.SetAttributesRequest) {
-        if request.isValid(FSItem.Attribute.uid) {
-            existing.uid = request.uid
-        }
-        
-        if request.isValid(FSItem.Attribute.gid) {
-            existing.gid = request.gid
-        }
-        
-        if request.isValid(FSItem.Attribute.type) {
-            existing.type = request.type
-        }
-        
-        if request.isValid(FSItem.Attribute.mode) {
-            existing.mode = request.mode
-        }
-        
-        if request.isValid(FSItem.Attribute.linkCount) {
-            existing.linkCount = request.linkCount
-        }
-        
-        if request.isValid(FSItem.Attribute.flags) {
-            existing.flags = request.flags
-        }
-        
-        if request.isValid(FSItem.Attribute.size) {
-            existing.size = request.size
-        }
-        
-        if request.isValid(FSItem.Attribute.allocSize) {
-            existing.allocSize = request.allocSize
-        }
-        
-        if request.isValid(FSItem.Attribute.fileID) {
-            existing.fileID = request.fileID
-        }
-
-        if request.isValid(FSItem.Attribute.parentID) {
-            existing.parentID = request.parentID
-        }
-
-        if request.isValid(FSItem.Attribute.accessTime) {
-            let timespec = timespec()
-            request.accessTime = timespec
-            existing.accessTime = timespec
-        }
-        
-        if request.isValid(FSItem.Attribute.changeTime) {
-            let timespec = timespec()
-            request.changeTime = timespec
-            existing.changeTime = timespec
-        }
-        
-        if request.isValid(FSItem.Attribute.modifyTime) {
-            let timespec = timespec()
-            request.modifyTime = timespec
-            existing.modifyTime = timespec
-        }
-        
-        if request.isValid(FSItem.Attribute.addedTime) {
-            let timespec = timespec()
-            request.addedTime = timespec
-            existing.addedTime = timespec
-        }
-        
-        if request.isValid(FSItem.Attribute.birthTime) {
-            let timespec = timespec()
-            request.birthTime = timespec
-            existing.birthTime = timespec
-        }
-        
-        if request.isValid(FSItem.Attribute.backupTime) {
-            let timespec = timespec()
-            request.backupTime = timespec
-            existing.backupTime = timespec
-        }
     }
 }
 
@@ -355,16 +265,12 @@ extension MyFSVolume: FSVolume.OpenCloseOperations {
     func openItem(_ item: FSItem, modes: FSVolume.OpenModes) async throws {
         if let item = item as? MyFSItem {
             logger.debug("open: \(item.name)")
-        } else {
-            logger.debug("open: \(item)")
         }
     }
     
     func closeItem(_ item: FSItem, modes: FSVolume.OpenModes) async throws {
         if let item = item as? MyFSItem {
             logger.debug("close: \(item.name)")
-        } else {
-            logger.debug("close: \(item)")
         }
     }
 }
@@ -372,64 +278,46 @@ extension MyFSVolume: FSVolume.OpenCloseOperations {
 extension MyFSVolume: FSVolume.XattrOperations {
 
     func xattr(named name: FSFileName, of item: FSItem) async throws -> Data {
-        logger.debug("xattr: \(item) - \(name.string ?? "NA")")
-        
         if let item = item as? MyFSItem {
             return item.xattrs[name] ?? Data()
-        } else {
-            return Data()
         }
+        return Data()
     }
     
     func setXattr(named name: FSFileName, to value: Data?, on item: FSItem, policy: FSVolume.SetXattrPolicy) async throws {
-        logger.debug("setXattrOf: \(item)")
-        
-        if let item = item as? MyFSItem {
-            item.xattrs[name] = value
-        }
+        throw ZipPOSIX.error(.EROFS)
     }
     
     func xattrs(of item: FSItem) async throws -> [FSFileName] {
-        logger.debug("listXattrs: \(item)")
-        
         if let item = item as? MyFSItem {
             return Array(item.xattrs.keys)
-        } else {
-            return []
         }
+        return []
     }
 }
 
 extension MyFSVolume: FSVolume.ReadWriteOperations {
 
     func read(from item: FSItem, at offset: off_t, length: Int, into buffer: FSMutableFileDataBuffer) async throws -> Int {
-        logger.debug("read: \(item)")
-        
-        var bytesRead = 0
-        
-        if let item = item as? MyFSItem, let data = item.data {
-            bytesRead = data.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) in
-                let length = min(buffer.length, data.count)
-                _ = buffer.withUnsafeMutableBytes { dst in
-                    memcpy(dst.baseAddress, ptr.baseAddress, length)
-                }
-                return length
-            }
+        guard let item = item as? MyFSItem else {
+            throw ZipPOSIX.error(.EIO)
         }
         
-        return bytesRead
+        do {
+            let data = try zipVolume.read(item.node, offset: UInt64(max(offset, 0)), length: min(length, buffer.length))
+            let count = min(buffer.length, data.count)
+            _ = buffer.withUnsafeMutableBytes { dst in
+                data.withUnsafeBytes { src in
+                    memcpy(dst.baseAddress, src.baseAddress, count)
+                }
+            }
+            return count
+        } catch {
+            throw ZipPOSIX.map(error)
+        }
     }
     
     func write(contents: Data, to item: FSItem, at offset: off_t) async throws -> Int {
-        logger.debug("write: \(item) - \(offset)")
-        
-        if let item = item as? MyFSItem {
-            logger.debug("- write: \(item.name)")
-            item.data = contents
-            item.attributes.size = UInt64(contents.count)
-            item.attributes.allocSize = UInt64(contents.count)
-        }
-        
-        return contents.count
+        throw ZipPOSIX.error(.EROFS)
     }
 }
