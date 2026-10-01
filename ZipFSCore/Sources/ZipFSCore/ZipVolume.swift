@@ -1,22 +1,19 @@
 import Foundation
 
-public struct ZipDirectoryEntry: Sendable {
-    public let node: ZipNode
-    public let nextCookie: UInt64
-}
-
-public final class ZipVolume: @unchecked Sendable {
+public final class ZipVolume: ArchiveVolumeProviding, @unchecked Sendable {
     public let archive: ZipArchive
-    public let tree: ZipTree
+    public let tree: ArchiveTree
     public let name: String
     public var root: ZipNode { tree.root }
+    public var totalUncompressedSize: UInt64 { archive.totalUncompressedSize }
+    public var entryCount: Int { archive.entries.count }
 
     private let cacheLock = NSLock()
     private var cache: [UInt64: Data] = [:]
 
     public init(archive: ZipArchive, name: String) {
         self.archive = archive
-        self.tree = ZipTree(archive: archive)
+        self.tree = ArchiveTree(members: Self.members(from: archive))
         self.name = name
     }
 
@@ -47,7 +44,7 @@ public final class ZipVolume: @unchecked Sendable {
         return current
     }
 
-    public func enumerate(_ directory: ZipNode, startingAt cookie: UInt64) throws -> [ZipDirectoryEntry] {
+    public func enumerate(_ directory: ZipNode, startingAt cookie: UInt64) throws -> [ArchiveDirectoryEntry] {
         guard directory.isDirectory else {
             throw ZipError.notDirectory
         }
@@ -60,7 +57,7 @@ public final class ZipVolume: @unchecked Sendable {
             return []
         }
         return (start..<children.count).map { index in
-            ZipDirectoryEntry(node: children[index], nextCookie: UInt64(index + 1))
+            ArchiveDirectoryEntry(node: children[index], nextCookie: UInt64(index + 1))
         }
     }
 
@@ -68,9 +65,10 @@ public final class ZipVolume: @unchecked Sendable {
         guard !node.isDirectory else {
             throw ZipError.isDirectory
         }
-        guard let entry = node.entry else {
+        guard let entryIndex = node.entryIndex, archive.entries.indices.contains(entryIndex) else {
             throw ZipError.notFound
         }
+        let entry = archive.entries[entryIndex]
         if offset > UInt64(entry.uncompressedSize) {
             throw ZipError.invalidOffset
         }
@@ -131,5 +129,18 @@ public final class ZipVolume: @unchecked Sendable {
         cache[node.fileID] = data
         cacheLock.unlock()
         return data
+    }
+
+    private static func members(from archive: ZipArchive) -> [ArchiveTreeMember] {
+        archive.entries.enumerated().map { index, entry in
+            ArchiveTreeMember(
+                path: entry.path,
+                isDirectory: entry.isDirectory,
+                uncompressedSize: UInt64(entry.uncompressedSize),
+                modified: entry.modified,
+                posixMode: entry.posixMode,
+                entryIndex: entry.isDirectory ? nil : index
+            )
+        }
     }
 }

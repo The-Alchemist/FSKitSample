@@ -4,20 +4,21 @@ struct OnboardingView: View {
     @Environment(ViewModel.self) private var viewModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 12) {
             Text("Enable ZipFS")
-                .font(.largeTitle.bold())
+                .font(.title2.bold())
 
-            Text("ZipFSKitExp needs permission to mount ZIP archives. macOS requires you to turn on the File System Extension once per install (and again after some app updates).")
+            Text("ZipFS needs permission to mount ZIP and 7z archives. Turn on the File System Extension once per install (and again after some app updates).")
+                .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             GroupBox("Setup checklist") {
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 10) {
                     checklistRow(
                         number: 1,
                         title: "App installed",
-                        detail: "You are running ZipFSKitExp.",
+                        detail: "ZipFS is running in the menu bar.",
                         isComplete: true
                     )
 
@@ -30,15 +31,15 @@ struct OnboardingView: View {
 
                     checklistRow(
                         number: 3,
-                        title: "File System Extension enabled",
+                        title: "Extension enabled",
                         detail: "In System Settings, turn on **FSKitExpExtension** under File System Extensions.",
                         isComplete: viewModel.isExtensionEnabled
                     )
 
                     checklistRow(
                         number: 4,
-                        title: "Open ZIP archives",
-                        detail: "Double-click a `.zip` file or use Mount in this app.",
+                        title: "Open archives",
+                        detail: "Double-click a `.zip` or `.7z` file or use Mount in this menu.",
                         isComplete: viewModel.isExtensionEnabled
                     )
                 }
@@ -58,22 +59,20 @@ struct OnboardingView: View {
                 if viewModel.isPollingModules {
                     ProgressView()
                         .controlSize(.small)
-                        .padding(.leading, 4)
                     Text("Checking…")
+                        .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
 
             if !viewModel.isModuleRegistered {
                 Text("If the extension does not appear, rebuild with a paid Apple Developer team and run this app once from Xcode or Applications.")
-                    .font(.callout)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-
-            Spacer()
         }
-        .padding(24)
-        .frame(minWidth: 640, minHeight: 420)
+        .padding(12)
         .onAppear {
             viewModel.startModulePolling()
         }
@@ -96,17 +95,17 @@ struct OnboardingView: View {
         detail: String,
         isComplete: Bool
     ) -> some View {
-        HStack(alignment: .top, spacing: 12) {
+        HStack(alignment: .top, spacing: 8) {
             Image(systemName: isComplete ? "checkmark.circle.fill" : "circle")
                 .foregroundStyle(isComplete ? .green : .secondary)
-                .font(.title3)
-                .frame(width: 24)
+                .font(.body)
+                .frame(width: 18)
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text("\(number). \(title)")
-                    .font(.headline)
+                    .font(.subheadline.weight(.semibold))
                 Text(LocalizedStringKey(detail))
-                    .font(.callout)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }

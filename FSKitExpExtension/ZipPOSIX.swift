@@ -20,7 +20,7 @@ enum ZipPOSIX {
             return Self.error(.ENOTDIR)
         case .isDirectory:
             return Self.error(.EISDIR)
-        case .invalidOffset, .notZip:
+        case .invalidOffset, .notZip, .notSevenZip, .notArchive:
             return Self.error(.EINVAL)
         default:
             return Self.error(.EIO)
@@ -46,7 +46,7 @@ enum ZipAttributes {
         attributes.linkCount = 1
         attributes.type = node.isDirectory ? .directory : .file
         let fileType: UInt32 = node.isDirectory ? UInt32(S_IFDIR) : UInt32(S_IFREG)
-        attributes.mode = fileType | UInt32(node.posixMode)
+        attributes.mode = fileType | presentedMode(for: node)
         attributes.size = node.size
         attributes.allocSize = node.size
         let timespec = Self.posixTimespec(from: node.modified)
@@ -63,5 +63,14 @@ enum ZipAttributes {
         value.tv_sec = time_t(seconds)
         value.tv_nsec = Int((seconds - floor(seconds)) * 1_000_000_000)
         return value
+    }
+
+    /// Drop write bits so Finder/Launch Services treat items as read-only and
+    /// do not try to set quarantine xattrs (which fail on an MNT_RDONLY mount).
+    private static func presentedMode(for node: ZipNode) -> UInt32 {
+        if node.isDirectory {
+            return 0o555
+        }
+        return 0o444 | (UInt32(node.posixMode) & 0o111)
     }
 }

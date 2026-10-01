@@ -23,7 +23,7 @@ final class MyFS: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         
         do {
             let prefix = try Self.readPrefix(from: resource)
-            guard ZipMagic.isZip(prefix: prefix) else {
+            guard ZipMagic.isZip(prefix: prefix) || SevenZipMagic.isSevenZip(prefix: prefix) else {
                 replyHandler(FSProbeResult.notRecognized, nil)
                 return
             }
@@ -53,10 +53,10 @@ final class MyFS: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         do {
             let source = try makeSource(from: resource)
             let name = Self.volumeName(for: resource)
-            let archive = try ZipArchive(source: source)
+            let archiveVolume = try ArchiveOpener.open(source: source, name: name)
             let volume = try MyFSVolume(
                 resource: resource,
-                archive: archive,
+                archiveVolume: archiveVolume,
                 volumeName: name
             )
             containerStatus = .ready
@@ -93,7 +93,7 @@ final class MyFS: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         if let blockResource = resource as? FSBlockDeviceResource {
             return BlockDeviceZipSource(resource: blockResource)
         }
-        throw ZipError.notZip
+        throw ZipError.notArchive
     }
     
     private func stopScopedAccess() {
@@ -112,11 +112,11 @@ final class MyFS: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             }
             let handle = try FileHandle(forReadingFrom: url)
             defer { try? handle.close() }
-            return try handle.read(upToCount: 4) ?? Data()
+            return try handle.read(upToCount: 6) ?? Data()
         }
         if let blockResource = resource as? FSBlockDeviceResource {
             let source = BlockDeviceZipSource(resource: blockResource)
-            return try source.read(offset: 0, length: 4)
+            return try source.read(offset: 0, length: 6)
         }
         return Data()
     }

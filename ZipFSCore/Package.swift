@@ -12,9 +12,15 @@ let package = Package(
         .executable(name: "zipfs", targets: ["zipfs"]),
         .executable(name: "ZipFSCoreCheck", targets: ["ZipFSCoreCheck"]),
     ],
+    dependencies: [
+        .package(path: "Vendor/PLzmaSDK"),
+    ],
     targets: [
         .target(
             name: "ZipFSCore",
+            dependencies: [
+                .product(name: "PLzmaSDK", package: "PLzmaSDK"),
+            ],
             linkerSettings: [
                 .linkedLibrary("z"),
             ]
@@ -26,6 +32,9 @@ let package = Package(
         .executableTarget(
             name: "ZipFSCoreCheck",
             dependencies: ["ZipFSCore"],
+            resources: [
+                .copy("Fixtures"),
+            ],
             linkerSettings: [
                 .linkedLibrary("z"),
             ]

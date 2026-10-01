@@ -51,9 +51,8 @@ struct ZipFSCommand {
         }
     }
 
-    private static func volume(at archivePath: String) throws -> ZipVolume {
-        let url = URL(fileURLWithPath: archivePath)
-        return try ZipVolume(url: url)
+    private static func volume(at archivePath: String) throws -> any ArchiveVolumeProviding {
+        try ArchiveOpener.open(url: URL(fileURLWithPath: archivePath))
     }
 
     private static func ls(archivePath: String, path: String) throws {
@@ -80,9 +79,8 @@ struct ZipFSCommand {
         print("size: \(node.size)")
         print("mode: \(String(node.posixMode, radix: 8))")
         print("modified: \(node.modified)")
-        if let entry = node.entry {
-            print("compression: \(entry.compressionMethod)")
-            print("crc32: \(String(entry.crc32, radix: 16))")
+        if let entryIndex = node.entryIndex {
+            print("entryIndex: \(entryIndex)")
         }
     }
 
@@ -138,10 +136,10 @@ struct ZipFSCommand {
     private static func printUsage() {
         let text = """
         usage:
-          zipfs ls <archive.zip> [path]
-          zipfs stat <archive.zip> <path>
-          zipfs cat <archive.zip> <path>
-          zipfs read <archive.zip> <path> [--offset N] [--length N]
+          zipfs ls <archive.zip|.7z> [path]
+          zipfs stat <archive.zip|.7z> <path>
+          zipfs cat <archive.zip|.7z> <path>
+          zipfs read <archive.zip|.7z> <path> [--offset N] [--length N]
         """
         FileHandle.standardError.write(Data(text.utf8 + Data("\n".utf8)))
     }

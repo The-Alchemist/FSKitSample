@@ -13,7 +13,7 @@ final class MyFSItem: FSItem {
     let node: ZipNode
     let name: FSFileName
     var attributes = FSItem.Attributes()
-    var xattrs: [FSFileName: Data] = [:]
+    var xattrs: [String: Data] = [:]
     
     init(node: ZipNode) {
         self.node = node

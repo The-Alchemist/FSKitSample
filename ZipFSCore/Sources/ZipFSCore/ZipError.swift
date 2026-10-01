@@ -2,6 +2,8 @@ import Foundation
 
 public enum ZipError: Error, Equatable, Sendable {
     case notZip
+    case notSevenZip
+    case notArchive
     case truncated
     case zip64Unsupported
     case encryptedUnsupported
@@ -20,16 +22,20 @@ extension ZipError: LocalizedError {
         switch self {
         case .notZip:
             return "Not a ZIP archive"
+        case .notSevenZip:
+            return "Not a 7z archive"
+        case .notArchive:
+            return "Not a supported archive"
         case .truncated:
-            return "Truncated ZIP archive"
+            return "Truncated archive"
         case .zip64Unsupported:
             return "Zip64 archives are not supported"
         case .encryptedUnsupported:
-            return "Encrypted ZIP entries are not supported"
+            return "Encrypted archive entries are not supported"
         case .compressionUnsupported(let method):
             return "Unsupported ZIP compression method \(method)"
         case .crcMismatch:
-            return "ZIP CRC mismatch"
+            return "Archive CRC mismatch"
         case .readOnly:
             return "Volume is read-only"
         case .notFound:

@@ -14,16 +14,16 @@ import ZipFSCore
 final class MyFSVolume: FSVolume {
     
     private let resource: FSResource
-    private let zipVolume: ZipVolume
+    private let archiveVolume: any ArchiveVolumeProviding
     private let logger = Logger(subsystem: "FSKitExp", category: "MyFSVolume")
     private var items: [UInt64: MyFSItem] = [:]
     private let rootItem: MyFSItem
     
-    init(resource: FSResource, archive: ZipArchive, volumeName: String) throws {
+    init(resource: FSResource, archiveVolume: any ArchiveVolumeProviding, volumeName: String) throws {
         self.resource = resource
-        self.zipVolume = ZipVolume(archive: archive, name: volumeName)
-        self.rootItem = MyFSItem(node: zipVolume.root)
-        self.items[zipVolume.root.fileID] = rootItem
+        self.archiveVolume = archiveVolume
+        self.rootItem = MyFSItem(node: archiveVolume.root)
+        self.items[archiveVolume.root.fileID] = rootItem
         
         super.init(
             volumeID: FSVolume.Identifier(
@@ -62,7 +62,7 @@ extension MyFSVolume: FSVolume.PathConfOperations {
     }
     
     var maximumXattrSize: Int {
-        return 0
+        return 64 * 1024
     }
     
     var maximumFileSize: UInt64 {
@@ -90,13 +90,13 @@ extension MyFSVolume: FSVolume.Operations {
         logger.debug("volumeStatistics")
 
         let result = FSStatFSResult(fileSystemTypeName: "MyFS")
-        let total = max(zipVolume.archive.totalUncompressedSize, 1)
+        let total = max(archiveVolume.totalUncompressedSize, 1)
         result.blockSize = 4096
         result.ioSize = 4096
         result.totalBlocks = (total + 4095) / 4096
         result.availableBlocks = 0
         result.freeBlocks = 0
-        result.totalFiles = UInt64(zipVolume.archive.entries.count)
+        result.totalFiles = UInt64(archiveVolume.entryCount)
         result.freeFiles = 0
         return result
     }
@@ -161,7 +161,7 @@ extension MyFSVolume: FSVolume.Operations {
         }
         
         do {
-            let node = try zipVolume.lookup(name: nameString, in: directory.node)
+            let node = try archiveVolume.lookup(name: nameString, in: directory.node)
             let item = item(for: node)
             return (item, name)
         } catch {
@@ -238,7 +238,7 @@ extension MyFSVolume: FSVolume.Operations {
         }
         
         do {
-        let entries = try zipVolume.enumerate(directory.node, startingAt: UInt64(cookie.rawValue))
+        let entries = try archiveVolume.enumerate(directory.node, startingAt: UInt64(cookie.rawValue))
             for entry in entries {
                 let item = item(for: entry.node)
                 let packed = packer.packEntry(
@@ -263,6 +263,9 @@ extension MyFSVolume: FSVolume.Operations {
 extension MyFSVolume: FSVolume.OpenCloseOperations {
     
     func openItem(_ item: FSItem, modes: FSVolume.OpenModes) async throws {
+        if modes.contains(.write) {
+            throw ZipPOSIX.error(.EROFS)
+        }
         if let item = item as? MyFSItem {
             logger.debug("open: \(item.name)")
         }
@@ -278,21 +281,40 @@ extension MyFSVolume: FSVolume.OpenCloseOperations {
 extension MyFSVolume: FSVolume.XattrOperations {
 
     func xattr(named name: FSFileName, of item: FSItem) async throws -> Data {
-        if let item = item as? MyFSItem {
-            return item.xattrs[name] ?? Data()
+        guard let item = item as? MyFSItem, let key = name.string else {
+            throw ZipPOSIX.error(.ENOATTR)
         }
-        return Data()
+        guard let value = item.xattrs[key] else {
+            throw ZipPOSIX.error(.ENOATTR)
+        }
+        return value
     }
     
     func setXattr(named name: FSFileName, to value: Data?, on item: FSItem, policy: FSVolume.SetXattrPolicy) async throws {
-        throw ZipPOSIX.error(.EROFS)
+        // Keep the zip read-only; allow in-memory xattrs so Launch Services /
+        // Open With can set com.apple.macl and quarantine without failing.
+        guard let item = item as? MyFSItem, let key = name.string else {
+            throw ZipPOSIX.error(.EIO)
+        }
+        switch policy {
+        case .delete:
+            item.xattrs.removeValue(forKey: key)
+            return
+        case .mustCreate where item.xattrs[key] != nil:
+            throw ZipPOSIX.error(.EEXIST)
+        case .mustReplace where item.xattrs[key] == nil:
+            throw ZipPOSIX.error(.ENOATTR)
+        default:
+            break
+        }
+        item.xattrs[key] = value ?? Data()
     }
     
     func xattrs(of item: FSItem) async throws -> [FSFileName] {
-        if let item = item as? MyFSItem {
-            return Array(item.xattrs.keys)
+        guard let item = item as? MyFSItem else {
+            return []
         }
-        return []
+        return item.xattrs.keys.map { FSFileName(string: $0) }
     }
 }
 
@@ -304,7 +326,7 @@ extension MyFSVolume: FSVolume.ReadWriteOperations {
         }
         
         do {
-            let data = try zipVolume.read(item.node, offset: UInt64(max(offset, 0)), length: min(length, buffer.length))
+            let data = try archiveVolume.read(item.node, offset: UInt64(max(offset, 0)), length: min(length, buffer.length))
             let count = min(buffer.length, data.count)
             _ = buffer.withUnsafeMutableBytes { dst in
                 data.withUnsafeBytes { src in
